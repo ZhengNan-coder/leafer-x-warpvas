@@ -1,0 +1,23 @@
+{
+  "name": "leafer-x-warpvas",
+  "version": "1.0.0",
+  "description": "A Leafer.js plugin for image warping – ported from fabric-warpvas",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build --entry src/index.ts"
+  },
+  "dependencies": {
+    "warpvas": "^1.0.1",
+    "warpvas-perspective": "^1.0.1"
+  },
+  "devDependencies": {
+    "@leafer-ui/core": "^1.6.0",
+    "leafer-ui": "^1.6.0",
+    "typescript": "^5.3.3",
+    "vite": "^5.0.0"
+  },
+  "peerDependencies": {
+    "leafer-ui": ">=1.0.0"
+  }
+}

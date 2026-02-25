@@ -1,0 +1,319 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>leafer-x-warpvas Demo</title>
+  <style>
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: #1a1a2e;
+      color: #e0e0e0;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+
+    header {
+      padding: 16px 24px;
+      background: rgba(255,255,255,0.05);
+      border-bottom: 1px solid rgba(255,255,255,0.1);
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    header h1 {
+      font-size: 18px;
+      font-weight: 700;
+      color: #7ee8fa;
+      letter-spacing: 0.5px;
+    }
+
+    header .badge {
+      font-size: 11px;
+      padding: 2px 8px;
+      background: #7ee8fa22;
+      color: #7ee8fa;
+      border: 1px solid #7ee8fa44;
+      border-radius: 12px;
+    }
+
+    .layout {
+      display: flex;
+      flex: 1;
+      overflow: hidden;
+    }
+
+    .sidebar {
+      width: 240px;
+      background: rgba(255,255,255,0.03);
+      border-right: 1px solid rgba(255,255,255,0.08);
+      padding: 20px 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 24px;
+      overflow-y: auto;
+    }
+
+    .sidebar section h3 {
+      font-size: 11px;
+      font-weight: 600;
+      color: #888;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      margin-bottom: 10px;
+    }
+
+    .btn-group {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    button {
+      padding: 9px 14px;
+      border: none;
+      border-radius: 8px;
+      cursor: pointer;
+      font-size: 13px;
+      font-weight: 500;
+      transition: all 0.15s ease;
+      text-align: left;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    button .icon {
+      font-size: 15px;
+      width: 20px;
+      text-align: center;
+    }
+
+    button.primary {
+      background: #4a90e2;
+      color: white;
+    }
+    button.primary:hover { background: #357abd; }
+
+    button.secondary {
+      background: #6c63ff22;
+      color: #a09bff;
+      border: 1px solid #6c63ff44;
+    }
+    button.secondary:hover { background: #6c63ff44; }
+
+    button.success {
+      background: #27ae6022;
+      color: #4dbd74;
+      border: 1px solid #27ae6044;
+    }
+    button.success:hover { background: #27ae6044; }
+
+    button.danger {
+      background: #e74c3c22;
+      color: #e8827a;
+      border: 1px solid #e74c3c44;
+    }
+    button.danger:hover { background: #e74c3c44; }
+
+    button.neutral {
+      background: rgba(255,255,255,0.06);
+      color: #ccc;
+    }
+    button.neutral:hover { background: rgba(255,255,255,0.12); }
+
+    button:disabled {
+      opacity: 0.35;
+      cursor: not-allowed;
+    }
+
+    button.active {
+      box-shadow: 0 0 0 2px currentColor;
+    }
+
+    .status-panel {
+      background: rgba(255,255,255,0.04);
+      border: 1px solid rgba(255,255,255,0.08);
+      border-radius: 8px;
+      padding: 12px;
+      font-size: 12px;
+      line-height: 1.8;
+    }
+
+    .status-panel .label {
+      color: #888;
+      display: inline-block;
+      width: 50px;
+    }
+
+    .status-panel .value {
+      color: #7ee8fa;
+      font-family: monospace;
+    }
+
+    .status-panel .value.active {
+      color: #4dbd74;
+    }
+
+    .canvas-area {
+      flex: 1;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      position: relative;
+      background: #13131f;
+      overflow: hidden;
+    }
+
+    #canvas-container {
+      position: relative;
+      box-shadow: 0 8px 40px rgba(0,0,0,0.6);
+      border-radius: 4px;
+      overflow: hidden;
+    }
+
+    #leafer-canvas {
+      display: block;
+      background: #2a2a3e;
+    }
+
+    .hint {
+      position: absolute;
+      bottom: 20px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: rgba(0,0,0,0.6);
+      color: #aaa;
+      font-size: 12px;
+      padding: 6px 14px;
+      border-radius: 20px;
+      pointer-events: none;
+      white-space: nowrap;
+    }
+
+    .code-panel {
+      position: absolute;
+      bottom: 0;
+      left: 0;
+      right: 0;
+      background: rgba(10,10,20,0.96);
+      border-top: 1px solid rgba(255,255,255,0.1);
+      padding: 12px 20px;
+      font-size: 12px;
+      font-family: 'JetBrains Mono', Consolas, monospace;
+      color: #a0c4ff;
+      max-height: 120px;
+      overflow-y: auto;
+    }
+
+    .code-panel .comment { color: #6a737d; }
+    .code-panel .keyword { color: #f97583; }
+    .code-panel .string  { color: #9ecbff; }
+    .code-panel .fn      { color: #b392f0; }
+
+    .divider {
+      height: 1px;
+      background: rgba(255,255,255,0.06);
+      margin: 4px 0;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>leafer-x-warpvas</h1>
+    <span class="badge">Demo</span>
+  </header>
+
+  <div class="layout">
+    <!-- 侧边栏工具区 -->
+    <aside class="sidebar">
+      <section>
+        <h3>变形模式</h3>
+        <div class="btn-group">
+          <button id="btn-warp" class="secondary">
+            <span class="icon">⬡</span> 扭曲变形（Warp）
+          </button>
+          <button id="btn-perspective" class="secondary">
+            <span class="icon">⬭</span> 透视变形（Perspective）
+          </button>
+          <button id="btn-leave" class="danger" disabled>
+            <span class="icon">✕</span> 退出编辑
+          </button>
+        </div>
+      </section>
+
+      <div class="divider"></div>
+
+      <section>
+        <h3>历史记录</h3>
+        <div class="btn-group">
+          <button id="btn-undo" class="neutral" disabled>
+            <span class="icon">↩</span> 撤销（Ctrl+Z）
+          </button>
+          <button id="btn-redo" class="neutral" disabled>
+            <span class="icon">↪</span> 重做（Ctrl+Y）
+          </button>
+          <button id="btn-reset" class="neutral" disabled>
+            <span class="icon">⟳</span> 重置变形
+          </button>
+        </div>
+      </section>
+
+      <div class="divider"></div>
+
+      <section>
+        <h3>状态</h3>
+        <div class="status-panel">
+          <div><span class="label">模式：</span><span id="status-mode" class="value">—</span></div>
+          <div><span class="label">编辑中：</span><span id="status-editing" class="value">否</span></div>
+          <div><span class="label">历史：</span><span id="status-history" class="value">0 步</span></div>
+        </div>
+      </section>
+
+      <div class="divider"></div>
+
+      <section>
+        <h3>帮助</h3>
+        <div class="status-panel" style="font-size:11px; color:#888; line-height:1.9;">
+          <b style="color:#aaa;">Warp 模式：</b><br>
+          · 拖动顶点调整形状<br>
+          · 点击顶点显示曲线句柄<br>
+          · 拖动句柄调整曲线弧度<br><br>
+          <b style="color:#aaa;">Perspective 模式：</b><br>
+          · 拖动四角实现透视变换
+        </div>
+      </section>
+    </aside>
+
+    <!-- 画布区域 -->
+    <main class="canvas-area">
+      <div id="canvas-container">
+        <div id="leafer-canvas"></div>
+      </div>
+
+      <div class="hint" id="hint">选择左侧变形模式以开始</div>
+
+      <!-- 快捷键代码示例面板 -->
+      <div class="code-panel">
+        <span class="comment">// leafer-x-warpvas 快速上手</span><br>
+        <span class="keyword">import</span> { LeaferWarpvas, Warp, Perspective } <span class="keyword">from</span> <span class="string">'leafer-x-warpvas'</span><br>
+        <span class="keyword">const</span> lw = <span class="keyword">new</span> <span class="fn">LeaferWarpvas</span>(app, { enableHistory: <span class="keyword">true</span> })<br>
+        lw.<span class="fn">enterEditing</span>(image, srcCanvas, <span class="keyword">new</span> <span class="fn">Warp</span>())
+        &nbsp;&nbsp;<span class="comment">// 开始编辑</span><br>
+        lw.<span class="fn">leaveEditing</span>()
+        &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="comment">// 完成编辑</span>
+      </div>
+    </main>
+  </div>
+
+  <script type="module" src="./main.ts"></script>
+</body>
+</html>
