@@ -31,7 +31,6 @@ export type LeaferWarpvasOptions = {
  * const leaferImage = new Image({ x: 100, y: 100, width: 400, height: 300, url: 'image.jpg' })
  * app.tree.add(leaferImage)
  *
- * // 使用 app.tree 作为图层
  * const leaferWarpvas = new LeaferWarpvas(app.tree)
  *
  * const img = new window.Image()
@@ -46,9 +45,7 @@ export type LeaferWarpvasOptions = {
  * ```
  */
 export class LeaferWarpvas {
-  /**
-   * Leafer 图层实例（`App.tree`、`App.sky` 或独立的 `Leafer` 实例均可）
-   */
+  /** Leafer 图层实例（`App.tree`、`App.sky` 或独立的 `Leafer` 实例均可） */
   app: ILeafer
 
   /** 实例配置 */
@@ -69,14 +66,33 @@ export class LeaferWarpvas {
   /** 当前激活的变形模式 */
   mode: AbstractMode | null = null
 
-  /** warpvas 坐标 → Leafer 页面坐标的 X 轴比例 */
-  private _scaleX = 1
+  /**
+   * warpvas 坐标 → Leafer 页面坐标的 X 轴比例
+   * 公开供 mode 内部使用（用于 totalX/totalY 转换）
+   */
+  scaleX = 1
 
-  /** warpvas 坐标 → Leafer 页面坐标的 Y 轴比例 */
-  private _scaleY = 1
+  /**
+   * warpvas 坐标 → Leafer 页面坐标的 Y 轴比例
+   * 公开供 mode 内部使用
+   */
+  scaleY = 1
 
+  /** warpvasImage 是否已加入画布（避免重复 add） */
+  private _warpvasImageOnCanvas = false
+
+  /**
+   * mode.render() 的清理回调——仅在 leaveEditing() 时执行，
+   * 负责移除 boundary paths 等首次渲染时添加的持久元素
+   */
   private _renderReturnCallback?: (() => void) | void
+
+  /**
+   * mode.dirtyRender() 的清理回调——在下次 dirty render 或 leaveEditing() 时执行，
+   * 负责移除控制点等结构性元素
+   */
   private _dirtyRenderReturnCallback?: (() => void) | void
+
   private _nextFrameRender?: number
 
   private _records: { undo: WarpState[]; redo: WarpState[] } = {
@@ -100,8 +116,8 @@ export class LeaferWarpvas {
    */
   warpToLeaferPoint(point: { x: number; y: number }): { x: number; y: number } {
     return {
-      x: (this.target?.x ?? 0) + point.x * this._scaleX,
-      y: (this.target?.y ?? 0) + point.y * this._scaleY,
+      x: (this.target?.x ?? 0) + point.x * this.scaleX,
+      y: (this.target?.y ?? 0) + point.y * this.scaleY,
     }
   }
 
@@ -110,8 +126,8 @@ export class LeaferWarpvas {
    */
   leaferToWarpPoint(point: { x: number; y: number }): { x: number; y: number } {
     return {
-      x: (point.x - (this.target?.x ?? 0)) / this._scaleX,
-      y: (point.y - (this.target?.y ?? 0)) / this._scaleY,
+      x: (point.x - (this.target?.x ?? 0)) / this.scaleX,
+      y: (point.y - (this.target?.y ?? 0)) / this.scaleY,
     }
   }
 
@@ -120,8 +136,8 @@ export class LeaferWarpvas {
    */
   pageToWarpDelta(dx: number, dy: number): { x: number; y: number } {
     return {
-      x: dx / this._scaleX,
-      y: dy / this._scaleY,
+      x: dx / this.scaleX,
+      y: dy / this.scaleY,
     }
   }
 
@@ -130,20 +146,16 @@ export class LeaferWarpvas {
   /**
    * 渲染变形效果
    *
-   * @param dirty - 是否为脏渲染（结构变化，如添加或删除分割点），默认 true
-   * @param options - 渲染选项
+   * - dirty=true：重建控制点结构（添加/删除了分割点时使用）
+   * - dirty=false：仅更新变形图像和控制点位置（拖拽过程中使用，无闪烁）
    */
   render(dirty = true, options: { skipHistoryRecording?: boolean } = {}) {
     if (!this.warpvas || !this.target) return
 
-    // 执行上次渲染的清理回调
+    // dirty render 时清理上次创建的控制点（结构性元素）
     if (dirty && this._dirtyRenderReturnCallback) {
       this._dirtyRenderReturnCallback()
       this._dirtyRenderReturnCallback = undefined
-    }
-    if (this._renderReturnCallback) {
-      this._renderReturnCallback()
-      this._renderReturnCallback = undefined
     }
 
     // 执行 warpvas 变形渲染
@@ -153,18 +165,12 @@ export class LeaferWarpvas {
     // 计算 warpvas → Leafer 的缩放比例
     const displayW = (this.target.width ?? 0) * (this.target.scaleX ?? 1)
     const displayH = (this.target.height ?? 0) * (this.target.scaleY ?? 1)
-    this._scaleX = renderCanvas.width > 0 ? displayW / renderCanvas.width : 1
-    this._scaleY = renderCanvas.height > 0 ? displayH / renderCanvas.height : 1
+    this.scaleX = renderCanvas.width > 0 ? displayW / renderCanvas.width : 1
+    this.scaleY = renderCanvas.height > 0 ? displayH / renderCanvas.height : 1
 
-    // 更新变形图像元素
+    // 更新变形图像的 URL（不 remove/add，避免闪烁）
     const dataUrl = renderCanvas.toDataURL('image/png')
-    if (this.warpvasImage) {
-      this.warpvasImage.url = dataUrl
-      this.warpvasImage.x = this.target.x ?? 0
-      this.warpvasImage.y = this.target.y ?? 0
-      this.warpvasImage.width = displayW
-      this.warpvasImage.height = displayH
-    } else {
+    if (!this.warpvasImage) {
       this.warpvasImage = new LeaferImage({
         x: this.target.x ?? 0,
         y: this.target.y ?? 0,
@@ -174,15 +180,31 @@ export class LeaferWarpvas {
         hitFill: 'none',
         editable: false,
       })
+    } else {
+      this.warpvasImage.url = dataUrl
+      this.warpvasImage.x = this.target.x ?? 0
+      this.warpvasImage.y = this.target.y ?? 0
+      this.warpvasImage.width = displayW
+      this.warpvasImage.height = displayH
+    }
+
+    // warpvasImage 只添加一次；paths 等持久元素也只在首次通过 mode.render() 建立
+    if (!this._warpvasImageOnCanvas) {
+      this.app.add(this.warpvasImage as any)
+      this._warpvasImageOnCanvas = true
+      // mode.render() 负责添加 boundary paths 等持久元素，返回清理函数在 leaveEditing 时执行
+      this._renderReturnCallback = this.mode?.render(this)
     }
 
     // 记录变形历史
     if (!options.skipHistoryRecording) this.record()
 
-    // 执行模式的渲染回调
-    this._renderReturnCallback = this.mode?.render(this)
     if (dirty) {
+      // dirty render：重建控制点
       this._dirtyRenderReturnCallback = this.mode?.dirtyRender(this)
+    } else {
+      // non-dirty render：只同步控制点位置（无 remove/add，无闪烁）
+      this.mode?.refreshPositions(this)
     }
   }
 
@@ -221,9 +243,7 @@ export class LeaferWarpvas {
     beforeFirstRender?: (warpvas: Warpvas) => void,
   ) {
     if (this.target) {
-      throw new Error(
-        '[LeaferWarpvas] 请先退出当前变形编辑状态，再进入新的变形编辑。',
-      )
+      throw new Error('[LeaferWarpvas] 请先退出当前变形编辑状态，再进入新的变形编辑。')
     }
 
     this.target = target
@@ -284,16 +304,24 @@ export class LeaferWarpvas {
   }
 
   /**
-   * 退出变形编辑模式，恢复原始元素可见性并清理资源
+   * 退出变形编辑模式，恢复原始元素可见性并清理所有资源
    */
   leaveEditing() {
     if (!this.target) return
 
-    // 执行清理回调
+    // 取消未执行的 rAF
+    if (this._nextFrameRender !== undefined) {
+      window.cancelAnimationFrame(this._nextFrameRender)
+      this._nextFrameRender = undefined
+    }
+
+    // 清理结构性控制点
     if (this._dirtyRenderReturnCallback) {
       this._dirtyRenderReturnCallback()
       this._dirtyRenderReturnCallback = undefined
     }
+
+    // 清理 paths 等持久元素（mode.render() 的清理函数）
     if (this._renderReturnCallback) {
       this._renderReturnCallback()
       this._renderReturnCallback = undefined
@@ -302,7 +330,7 @@ export class LeaferWarpvas {
     // 恢复原始元素可见性
     this.target.visible = true
 
-    // 清理变形图像
+    // 移除变形图像
     if (this.warpvasImage && (this.warpvasImage as any).parent) {
       this.app.remove(this.warpvasImage as any)
     }
@@ -313,17 +341,15 @@ export class LeaferWarpvas {
     this.warpvas = null
     this.warpvasImage = undefined
     this.renderCanvas = null
-    this._scaleX = 1
-    this._scaleY = 1
+    this.scaleX = 1
+    this.scaleY = 1
+    this._warpvasImageOnCanvas = false
     this._records.undo.length = 0
     this._records.redo.length = 0
   }
 
   // ─── 历史记录 ─────────────────────────────────────────────────────────────────
 
-  /**
-   * 记录当前变形状态到历史栈
-   */
   record() {
     if (!this.warpvas || !this.options.enableHistory) return
     this._records.redo.length = 0
@@ -331,9 +357,6 @@ export class LeaferWarpvas {
     this.options.onHistoryChange(this._records)
   }
 
-  /**
-   * 撤销上一步变形操作
-   */
   undo() {
     if (!this.warpvas) return
     const size = this._records.undo.length
@@ -345,9 +368,6 @@ export class LeaferWarpvas {
     this.options.onHistoryChange(this._records)
   }
 
-  /**
-   * 重做已撤销的变形操作
-   */
   redo() {
     if (!this.warpvas) return
     const record = this._records.redo.shift()
@@ -359,25 +379,16 @@ export class LeaferWarpvas {
     }
   }
 
-  /**
-   * 重置变形状态（清除所有变形效果）
-   */
   reset() {
     if (!this.warpvas) return
     this.warpvas.resetWarpState()
     this.render(true)
   }
 
-  /**
-   * 获取当前变形状态数据（可用于持久化或恢复）
-   */
   getWarpState(): WarpState | null {
     return this.warpvas?.getWarpState() ?? null
   }
 
-  /**
-   * 获取当前激活的变形模式
-   */
   getMode<T extends AbstractMode = AbstractMode>(): T | null {
     return this.mode as T | null
   }

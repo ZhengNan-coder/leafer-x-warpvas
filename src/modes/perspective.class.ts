@@ -1,7 +1,6 @@
 import { Ellipse, Line, DragEvent } from '@leafer-ui/core'
 import type { IDragEvent } from '@leafer/interface'
 import type { Warpvas } from 'warpvas'
-import { utils } from 'warpvas'
 import perspective from 'warpvas-perspective'
 import BaseMode, { BaseOptions, SUB_THEME_COLOR, THEME_COLOR } from './base.class'
 import type { LeaferWarpvas } from '../core/leafer-warpvas.class'
@@ -16,31 +15,50 @@ export enum VertexType {
   BOTTOM_RIGHT = 'br',
 }
 
+/** 每个方向对应的曲线端点配置 */
+const DIR_CONFIG: Record<string, { vertexType: VertexType; pointIdx: 0 | 3 }> = {
+  top:    { vertexType: VertexType.TOP_LEFT,     pointIdx: 0 },
+  right:  { vertexType: VertexType.TOP_RIGHT,    pointIdx: 0 },
+  bottom: { vertexType: VertexType.BOTTOM_RIGHT, pointIdx: 3 },
+  left:   { vertexType: VertexType.BOTTOM_LEFT,  pointIdx: 3 },
+}
+
+/** 顶点类型 → 代表方向（用于反向查找） */
+const VERTEX_TO_DIR: Record<VertexType, string> = {
+  [VertexType.TOP_LEFT]:     'top',
+  [VertexType.TOP_RIGHT]:    'right',
+  [VertexType.BOTTOM_RIGHT]: 'bottom',
+  [VertexType.BOTTOM_LEFT]:  'left',
+}
+
 /** 透视模式配置 */
 type PerspectiveOptions = BaseOptions<{
   /** 是否启用拖拽空白区域实现整体变形 @default true */
   enableDragResize?: boolean
-  /** 空白区域拖拽的最小触发区域（像素） @default 50 */
-  minimumDragThreshold?: number
 }>
 
 type ControlMeta = {
   rowIndex: number
   colIndex: number
   vertexType: VertexType
+  /** 代表曲线与端点索引，用于从 warpvas 读回实际坐标 */
+  curve: { points: Array<{ x: number; y: number }> }
+  pointIdx: 0 | 3
 }
 
 /**
  * 透视变形模式
  *
  * 通过拖动四个角控制点实现图像的透视变形效果。
+ * - 使用 totalX/totalY 消除控制点漂移
+ * - refreshPositions() 在非脏渲染后同步四角坐标和连线
  *
  * @example
  * ```typescript
  * import { LeaferWarpvas, Perspective } from 'leafer-x-warpvas'
  *
- * const leaferWarpvas = new LeaferWarpvas(app.tree)
- * leaferWarpvas.enterEditing(imageElement, sourceCanvas, new Perspective())
+ * const lw = new LeaferWarpvas(app.tree)
+ * lw.enterEditing(imageElement, sourceCanvas, new Perspective())
  * ```
  */
 class Perspective extends BaseMode<
@@ -53,7 +71,6 @@ class Perspective extends BaseMode<
     themeColor: THEME_COLOR,
     subThemeColor: SUB_THEME_COLOR,
     enableDragResize: true,
-    minimumDragThreshold: 50,
   }
 
   private _controlMap = new Map<InstanceType<typeof Ellipse>, ControlMeta>()
@@ -76,11 +93,10 @@ class Perspective extends BaseMode<
     return Array.from(this._controlMap.keys())
   }
 
-  /**
-   * 脏渲染：创建四角控制点和边界连线
-   */
-  dirtyRender(leaferWarpvas: LeaferWarpvas) {
-    const { app, warpvas } = leaferWarpvas
+  // ── 脏渲染：重建四角控制点 ─────────────────────────────────────────────────
+
+  dirtyRender(lw: LeaferWarpvas) {
+    const { app, warpvas } = lw
     if (!app || !warpvas) return
 
     const areaBounds = warpvas.regionBoundaryCurves as any[][]
@@ -89,37 +105,29 @@ class Perspective extends BaseMode<
     this._controlMap.clear()
     this._lines = []
 
-    // 方向 → 顶点类型 & 曲线端点索引
-    const config: Record<string, { vertexType: VertexType; pointIdx: 0 | 3 }> = {
-      top:    { vertexType: VertexType.TOP_LEFT,     pointIdx: 0 },
-      right:  { vertexType: VertexType.TOP_RIGHT,    pointIdx: 0 },
-      bottom: { vertexType: VertexType.BOTTOM_RIGHT, pointIdx: 3 },
-      left:   { vertexType: VertexType.BOTTOM_LEFT,  pointIdx: 3 },
-    }
-
     areaBounds.forEach((row, rowIndex) => {
       row.forEach((col: any, colIndex: number) => {
-        Object.entries(config).forEach(([direction, { vertexType, pointIdx }]) => {
+        Object.entries(DIR_CONFIG).forEach(([direction, { vertexType, pointIdx }]) => {
           const curve = col[direction]
           if (!curve) return
 
-          const warpPoint = curve.points[pointIdx] as { x: number; y: number }
-          const leaferPoint = leaferWarpvas.warpToLeaferPoint(warpPoint)
+          const warpPt = curve.points[pointIdx] as { x: number; y: number }
+          const lp = lw.warpToLeaferPoint(warpPt)
 
-          const control = this._createControl()
-          control.x = leaferPoint.x
-          control.y = leaferPoint.y
+          const ctrl = this._createControl()
+          ctrl.x = lp.x
+          ctrl.y = lp.y
 
-          app.add(control as any)
-          this._controlMap.set(control, { rowIndex, colIndex, vertexType })
+          app.add(ctrl as any)
+          this._controlMap.set(ctrl, { rowIndex, colIndex, vertexType, curve, pointIdx })
 
-          this._registerDrag(leaferWarpvas, control, rowIndex, colIndex, vertexType)
+          this._registerDrag(lw, ctrl, rowIndex, colIndex, vertexType, curve, pointIdx)
         })
       })
     })
 
-    // 绘制四条边界连线
-    this._drawLines(leaferWarpvas)
+    // 四条边界连线（连接相邻控制点）
+    this._buildLines(lw)
 
     return () => {
       this._controlMap.forEach((_, el) => {
@@ -134,127 +142,92 @@ class Perspective extends BaseMode<
     }
   }
 
+  // ── 非脏渲染：只更新位置 ───────────────────────────────────────────────────
+
+  /**
+   * 从 warpvas curve.points 重新读取四角坐标，更新控制点 x/y 和连线端点（无 add/remove）
+   */
+  refreshPositions(lw: LeaferWarpvas) {
+    super.refreshPositions(lw)
+    this._syncControlPositions(lw)
+    this._redrawLines()
+  }
+
+  // ── 拖拽注册 ──────────────────────────────────────────────────────────────
+
   private _registerDrag(
-    leaferWarpvas: LeaferWarpvas,
-    control: InstanceType<typeof Ellipse>,
+    lw: LeaferWarpvas,
+    ctrl: InstanceType<typeof Ellipse>,
     rowIndex: number,
     colIndex: number,
     vertexType: VertexType,
+    curve: { points: Array<{ x: number; y: number }> },
+    pointIdx: 0 | 3,
   ) {
-    const { warpvas } = leaferWarpvas
+    let startWarpX = 0
+    let startWarpY = 0
 
-    control.on(DragEvent.DRAG, (e: IDragEvent) => {
-      if (!warpvas) return
-      const { moveX, moveY } = e
+    ctrl.on(DragEvent.START, () => {
+      // 从 warpvas curve.points 读取起始坐标（权威来源）
+      startWarpX = curve.points[pointIdx].x
+      startWarpY = curve.points[pointIdx].y
+    })
 
-      control.x = (control.x ?? 0) + moveX
-      control.y = (control.y ?? 0) + moveY
+    ctrl.on(DragEvent.DRAG, (e: IDragEvent) => {
+      if (!lw.warpvas) return
 
-      const newWarpPos = leaferWarpvas.leaferToWarpPoint({ x: control.x, y: control.y })
+      // 用 totalX/totalY 计算目标 warpvas 坐标（无累积误差）
+      const newWarpPos = {
+        x: startWarpX + (e.totalX ?? 0) / lw.scaleX,
+        y: startWarpY + (e.totalY ?? 0) / lw.scaleY,
+      }
 
       try {
-        warpvas.updateVertexCoord(rowIndex, colIndex, vertexType, newWarpPos)
-        leaferWarpvas.requestRender(false, () => {
-          this._syncControlPositions(leaferWarpvas)
-          this._redrawLines()
-        }, { skipHistoryRecording: true })
+        lw.warpvas.updateVertexCoord(rowIndex, colIndex, vertexType, newWarpPos)
+
+        // 从 warpvas 读回实际坐标（消除漂移）
+        const actualWarp = curve.points[pointIdx]
+        const actualLp = lw.warpToLeaferPoint(actualWarp)
+        ctrl.x = actualLp.x
+        ctrl.y = actualLp.y
+
+        lw.requestRender(false, undefined, { skipHistoryRecording: true })
       } catch {
-        this._handleInvalidPerspective(leaferWarpvas, control, vertexType, rowIndex, colIndex)
+        // 透视无效（四点共线等）：将控制点限制在最近的有效位置
+        // 直接从 warpvas 读回上次有效坐标，不做复杂的交点计算
+        const lastValidWarp = curve.points[pointIdx]
+        const lastValidLp = lw.warpToLeaferPoint(lastValidWarp)
+        ctrl.x = lastValidLp.x
+        ctrl.y = lastValidLp.y
       }
     })
 
-    control.on(DragEvent.END, () => {
-      leaferWarpvas.record()
+    ctrl.on(DragEvent.END, () => {
+      lw.record()
     })
   }
 
-  private _handleInvalidPerspective(
-    leaferWarpvas: LeaferWarpvas,
-    control: InstanceType<typeof Ellipse>,
-    vertexType: VertexType,
-    rowIndex: number,
-    colIndex: number,
-  ) {
-    const { warpvas } = leaferWarpvas
-    if (!warpvas) return
+  // ── 内部辅助 ──────────────────────────────────────────────────────────────
 
-    // 找出其余三个控制点，沿拖拽方向找最近的有效交点
-    const others = this.controlObjects.filter((c) => c !== control)
-    const targetX = control.x ?? 0
-    const targetY = control.y ?? 0
-
-    // 取最近的其他控制点连线上的交点作为安全位置
-    let safePt: { x: number; y: number } | null = null
-    for (let i = 0; i < others.length; i++) {
-      const c1 = others[i]
-      const c2 = others[(i + 1) % others.length]
-      const pt = utils.calcIntersection(
-        { x: c1.x ?? 0, y: c1.y ?? 0 },
-        { x: c2.x ?? 0, y: c2.y ?? 0 },
-        { x: targetX, y: targetY },
-        leaferWarpvas.warpToLeaferPoint(
-          warpvas.regionBoundaryCurves[rowIndex]?.[colIndex]?.[
-            vertexType === VertexType.TOP_LEFT    ? 'top'    :
-            vertexType === VertexType.TOP_RIGHT   ? 'right'  :
-            vertexType === VertexType.BOTTOM_RIGHT? 'bottom' : 'left'
-          ]?.points?.[vertexType === VertexType.BOTTOM_RIGHT || vertexType === VertexType.BOTTOM_LEFT ? 3 : 0] ??
-          { x: 0, y: 0 },
-        ),
-      )
-      if (pt) { safePt = pt; break }
-    }
-
-    if (safePt) {
-      const safeRelative = utils.calcRelativeCoord(safePt, { x: targetX, y: targetY }, 1)
-      try {
-        warpvas.updateVertexCoord(
-          rowIndex, colIndex, vertexType,
-          leaferWarpvas.leaferToWarpPoint(safeRelative),
-        )
-        control.x = safeRelative.x
-        control.y = safeRelative.y
-      } catch { /* 仍失败则位置不变 */ }
-    } else {
-      // 无有效交点，恢复上一个有效点
-      const originalWarpPt = warpvas.regionBoundaryCurves[rowIndex]?.[colIndex]?.[
-        vertexType === VertexType.TOP_LEFT    ? 'top'    :
-        vertexType === VertexType.TOP_RIGHT   ? 'right'  :
-        vertexType === VertexType.BOTTOM_RIGHT? 'bottom' : 'left'
-      ]?.points?.[vertexType === VertexType.BOTTOM_RIGHT || vertexType === VertexType.BOTTOM_LEFT ? 3 : 0]
-      if (originalWarpPt) {
-        const lp = leaferWarpvas.warpToLeaferPoint(originalWarpPt)
-        control.x = lp.x
-        control.y = lp.y
-      }
-    }
-
-    leaferWarpvas.requestRender(false, undefined, { skipHistoryRecording: true })
-  }
-
-  private _syncControlPositions(leaferWarpvas: LeaferWarpvas) {
-    const { warpvas } = leaferWarpvas
-    if (!warpvas) return
-
-    const dirMap: Record<VertexType, { dir: string; pointIdx: 0 | 3 }> = {
-      [VertexType.TOP_LEFT]:     { dir: 'top',    pointIdx: 0 },
-      [VertexType.TOP_RIGHT]:    { dir: 'right',  pointIdx: 0 },
-      [VertexType.BOTTOM_RIGHT]: { dir: 'bottom', pointIdx: 3 },
-      [VertexType.BOTTOM_LEFT]:  { dir: 'left',   pointIdx: 3 },
-    }
+  /**
+   * 从 warpvas 读取四角实际坐标并更新控制点位置
+   */
+  private _syncControlPositions(lw: LeaferWarpvas) {
+    if (!lw.warpvas) return
 
     this._controlMap.forEach((meta, ctrl) => {
-      const { rowIndex, colIndex, vertexType } = meta
-      const { dir, pointIdx } = dirMap[vertexType]
-      const curve = (warpvas.regionBoundaryCurves as any[][])[rowIndex]?.[colIndex]?.[dir]
-      if (!curve) return
+      const { curve, pointIdx } = meta
       const pt = curve.points[pointIdx] as { x: number; y: number }
-      const lp = leaferWarpvas.warpToLeaferPoint(pt)
+      const lp = lw.warpToLeaferPoint(pt)
       ctrl.x = lp.x
       ctrl.y = lp.y
     })
   }
 
-  private _drawLines(leaferWarpvas: LeaferWarpvas) {
+  /**
+   * 构建四条边界连线（按 controlMap 中的顺序依次连接）
+   */
+  private _buildLines(lw: LeaferWarpvas) {
     const controls = this.controlObjects
     if (controls.length < 4) return
 
@@ -273,10 +246,13 @@ class Perspective extends BaseMode<
         editable: false,
       })
       this._lines.push(line)
-      leaferWarpvas.app.add(line as any)
+      lw.app.add(line as any)
     }
   }
 
+  /**
+   * 根据当前控制点位置重新绘制连线端点（不 remove/add，直接修改属性）
+   */
   private _redrawLines() {
     const controls = this.controlObjects
     this._lines.forEach((line: any, i) => {
